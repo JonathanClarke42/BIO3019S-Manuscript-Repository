@@ -1,0 +1,390 @@
+---
+title: "Bayesian adaptations of frequentist streamflow modelling techniques"
+author: "Jonathan Clarke"
+date: "`r Sys.Date()`"
+output: pdf_document
+bibliography: C:\\Users\\jonat\\Desktop\\BIO3019S\\BIO3019S-Streamflow-Project\\Literature\\.bib
+abstract: "I produced four Bayesian analogoues of frequentist streamflow models to test the transferability of the mathematical structures. Where possible, I introduced optimizations such as the Fourier transform to improve the computational efficiency of each model. Models were assessed based on fit to training the dataset, validity, and hindcasting ability. Although the core structure of the convolution was valid and did not suffer appreciable decrease in performance when hindcasting, it lacked sufficient complexity to describe a highly variable process. More complex models did failed validity and hindcasting tests due to use of unsuitable, though technically correct, mathematical functions."
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+dat_2023D <- read.csv("C:\\Users\\jonat\\Desktop\\BIO3019S\\BIO3019S-Streamflow-Project\\2023D.csv")
+dat_23MJD <- read.csv("C:\\Users\\jonat\\Desktop\\BIO3019S\\BIO3019S-Streamflow-Project\\23MJD.csv")
+dat_2024D <- read.csv("C:\\Users\\jonat\\Desktop\\BIO3019S\\BIO3019S-Streamflow-Project\\dat2024D.csv")
+library(rstan)
+library(ggplot2)
+library(patchwork)
+```
+
+# Introduction
+
+Streamflow modelling is a task of perennial importance to environmental managers, and the importance of predictive models grows every year as climate change renders weather patterns more uncertain. Streamflow is a temporally autocorrelated process with variability spanning orders of magnitude. Any model thereof must explicitly consider this autocorrelation and contain enough flexibility to account for variability between wet and dry seasons.
+
+Many sophisticated tools have been developed to account for these challenges. @AJLong2015 describes the core of some models as the convolution $$
+\hat{y_i} = \sum^i_jh_{i-j}u_i$$
+$$i,j = 1, 2, \cdots,N
+$$ where $i$ and $j$ are time-step indices within a time-series of length $N$, $h_{i-j}$ is the impulse response function, and $u_i$ is the input rainfall, and $\hat{y_i}$. For a comprehensive discussion of impulse response functions, see @KirchnerIRFs. Simply put, an impulse response function spreads the total input $u_i$ over subsequent time-steps, weighting the contribution to each as a proportion of the total. The convolution thus calculates the predicted streamflow of each time-step as the sum of of all past and present rainfall events' weighted contributions to that time-step. Impulse response functions are typically approximated by flexible probability functions such as the gamma density or negative binomial mass function.
+
+Thus, a convolution on its own may represent an autocorrelated system. Additional complexity may be added to account for the proportion of rainfall which infiltrates each time-step to become recharge, and for non-stationary behaviour (i.e. system behaviour which changes over time). The first end may be accomplished by respecifying $u_i$ as $$
+u_i = r_i\beta_i$$
+$$\beta_i = f(r_{ai})$$
+$$r_{ai} = r_i + r_{a,i-1}^{-\chi_i}$$where $r_i$ is the total rainfall of the $i$th time-step, $\beta_i \in [0,1]$, $f(r_{ai})$ some function of the volume of antecedent rainfall still impacting the system in that time-step, and $r_{ai}$ an exponential decay with rate $\chi$. The function $f(r_{ai})$ is typically formulated such that $\beta_i$ approaches 1 when $r_{ai}$ is large during the wet seasons, and small when $r_{ai}$ is small during the dry season. This thus represents the efficiency of run-off as a function of soil moisture.
+
+Non-stationary behaviour can be allowed by either introducing seasonal scaling coefficients, or by allowing the impulse response function to vary with time. For example, for some impulse response function $$NB(i-j|\mu, \phi)$$where $NB$ specifies the negative binomial distribution parameterised with a mean $\mu$ and dispersion $\phi$, the shape parameters $\mu$ and $\phi$ can be formualted as some function of $r_{ai}$ or other environmental covariates, to allow the lags applied to each rainfall event to vary through time.
+
+This project aims to test validity of the mathematic structures underpinning frequentist models when translated to suite a Bayesian methodology.
+
+# Methods
+
+All code to download the data, specify the models used, and run them is available at the GitHub repository https://github.com/JonathanClarke42/BIO3019S-Manuscript-Repository. The original data can be found at https://github.com/ecoforecast-africa/streamflow_jonkershoek, and was originally collected as part of the long-term Jonkershoek Catchment Experiment, managed by the South African Environmental Observation Network (SAEON). The subset used in this project comes from an approximately ten-year measurement of the streamflow, rainfall, windspeed, and other environmental conditions of the Langrivier stream. This stream has a catchment area of approximately 2.46 km$^2$ [@Mokua2024], and we have assumed $r_i (L) = 2.46 \times 10^6(m) * rainfall (mm)$ for this project. Given @Mokua2024 also describes this river system as sustained by springflow during the dry season, we have added a constant $1.27 \times 10^6 (L)$ (the minimum streamflow observed during the modelled period) to the streamflow predicted by our models each time-step to account for it.
+
+## Limitations and sampling routines
+
+The trade-off Bayesian numerical methods make for their flexibility is a lack of efficiency. Although I am able to specify models which run in less than an hour, the size of the resulting Stanfit object limits by ability to analyse them. With only 8 Gb of RAM at my disposal, I can only model an appreciably long timeseries using data in daily timesteps. This is unfortunate, as the greater resolution provided by hourly data may have allowed more precise inference. In addition, although I attempt to fit all my models to a calender year of data, the complexity of models with time-variant impulse response functions required me to abridge this to a three month period between the 1st of May and 31st of July. 
+
+Models were written using RStan [@Rstan] within RStudio [@RStudio; @R]. All models were run from a set seed (12345 in RStudio), with uninformative priors: $Cauchy(0,2.5)$ distributions for all parameters but observed streamflow and antecedent rainfall, which were $N(10^6, 10^4)$. Additionally, target acceptance rates and step sizes for the sampling routines were left to be determined by Stan. These decisions were taken so as to test the mathematics behind the models to see if they are general. For specific systems, informative priors would be advised to ensure the model, even if degenerate, is accurate enough for inference. All models were run with four chains, two-thousand warm-up iterations and two-thousand sampling iterations.
+
+## Basic model
+
+My simplest model describes streamflow as a function of only the convolution, $$y_i = \sum^i_jh_{i-j}u_i + 1.27\times10^6$$where $u_i$ is the rainfall in the *i*th time-step, $h_{i-j}$ is the negative binomial distribution, and the added baseflow the minimum streamflow rate observed. By utilizing the convolution theorem, which states that the convolution in the time domain is equal to element-wise multiplication in the frequency domain, I produced a model with computational complexity of the order $O(N) = N$, where $N$ is the number of time-steps in the model. Practically, this is achieved by applying the Fourier transform to vectors of $u_i$ and $h$, multiplying them, then applying the inverse transform to the product and extracting the real component. Applying the convolution theorem comes with three implicit assumptions.
+
+Firstly, this model assumes that the volume of rain which falls over the catchment area, $r_i$, equals the volume which reaches the river, $u_i$. As this cannot be true in any real system, I address it in my second model. Secondly, it assumes the impulse response function is time-invariant, an assumption almost certainly violated by any natural system. On a weekly basis, changes in soil moisture between wet a dry periods will influence how quickly rainfall reaches the river. On an annual basis, changes in catchment area topography and meteorology introduce further non-stationary behaviour. I address this assumption in my third model. For now, these assumptions will likely lead to an underfit model.
+
+A minor third implication of applying the convolution theorem is that a given rainfall event will contribute to an infinite number of future time-steps, albeit infinitismally. Practically, the contribution will quickly underflow to zero on most 64 bit systems. Given the impulse response function is normalized in log-space such that its values over every time-step sum to one, this will result in a small amount of recharge vanishing from the calculations. The significance of this is likely minor for any major river.
+
+Nevertheless, invoking the convolution theorem allows highly efficient computation. My machine could fit a model to an entire year of data in hourly time-steps in forty-five minutes, even if the resulting Stanfit object was too large to analyse further.
+
+## Input scaling
+
+The previous model explicitly assumed that the volume of rainfall, $r_i$, equaled the volume of input into the stream, $u_i$. However, a large portion of rainfall likely never reaches the stream, becoming absorbed by plants, sinking into an aquifer, or running into topographic traps within the catchment area. This model calculates $u_i$ as the product of $r_i$ and $\beta_i$, some scaling coefficient for each time-step. This coefficient is calculated as $$\beta_i=\frac{1}{1+e^{-\kappa r_{ai}-5}}$$where $\kappa$ is a dimensionless scaling coefficient estimated by the model and $r_{ai}$ is the volume of antecedent rain still impacting system behaviour. This function implies that $\beta_i \in [0.007,1]$ (normally, for some positive input $r_{ai}$, the minimum value for an inverse logistic function is 0.5. The rightwards translation of -5 reduces this minimum to be practically zero). To provides enough of a "transitional slope" between asymptotes to accommodate a large range in volumes of antecedent rainfall, $\kappa$ will be a very small positive number. Now, Stan can struggle to sample very small parameters, as their partial derivatives will indicate very flat posterior space. To alleviate this, $\kappa$ is sampled for log-space, and exponentiated in the calculation of $\beta_i$. This results in Stan sampling $\kappa$ as a large negative number, which will have a larger partial derivative.
+
+The volume of antecedent rain, $r_{ai}$, is treated as a latent variable, and is drawn from the distribution $$r_{ai} \sim normal(\hat{r}_{ai}, \sigma^2_a)$$where $\sigma^2_a$ is the standard deviation of the process (estimated by the model), and $\hat{r}_{ai}$ is the function of an exponential decay of the rainfall from prior time-steps, $$\hat{r}_{ai} = r_i + r_{a,i-1}^{-\chi_i}$$
+As the rate of decay, $\chi_i$ should depend heavily on environmental conditions, we treat it as a second latent variable, such that $$\chi_i \sim normal(\hat{\chi}_i, \sigma^2_{\chi})$$where $$\hat{\chi}_i = \beta_{0,\chi}+\beta_{1,\chi}\times w_i$$i.e. some linear regression based on the windspeed of that time-step, $w_i$. As with $\kappa$, $\beta_{1,\chi}$ is sampled from log-space and exponentiated in the calculation of $\hat{\chi}_i$. Initially, I calculated $\hat{\chi}_i$ using a multiple linear regression in terms of windspeed and temperature, but found that to result in models with severe validity issues.
+
+This has allowed me to remove the assumption that $r_i=u_i$, replacing it with $r_i=\beta_i\times u_i$. Ideally, I would have calculated $\beta_i$ as some function of the measured soil moisture. However, I couldn't find a mathematical relationship which both made theoretical sense to me and fit the data well. Treating $r_{ai}$ as a latent variable comes with a burden of complexity that limits the amount of data ingestable with a given budget of RAM.
+
+## Time-variant IRF
+
+Both previous models assumed time-invariant impulse response functions. Such models assume the same proportion of rain reaches the river every time-step. Basic intuition informs us that a greater proportion of rain will likely reach the river more quickly when $r_{ai}$ is high, as it can roll downhill over the surface of wet soil, but that infiltration time will be slower when $r_{ai}$ is low, as rain instead seeps into the soil and moves through subterranean pathways. To accommodate a time-variant impulse response function, I must abandon the convolution theorem, which is mathematically inflexible. Instead, I will specify latent shape parameters for the impulse response function, $\mu_i$ and $\phi_i$ for each time-step assuming a linear relationship with $r_{ai}$. I will then calculate a seven time-step impulse response function for each rainfall event, describing what proportion of $u_i$ reaches the river each time-step, for every time-step. The final predicted streamflow is the sum across every time-step of the weighted rainfall over the past seven days. Shape parameters are drawn from some normal distribution: $$\theta_{\mu/\phi,i}\sim normal(\hat{\theta}_{\mu/\phi,i},\sigma^2_{\mu/\phi})$$where $$\hat{\theta}_{\mu/\phi,i}=\beta_{0,\mu/\phi}+\beta_{1,\mu/\phi}\times r_{ai}$$
+
+Limiting the duration of each impulse response function to seven time-steps reduces computational complexity from $O(N)=N^2$ to $O(N)=7N$. As a result, no proportion of $u_i$ is lost through decimal underflow, as with the previous two models. However, assuming all of $u_i$ has entered the stream by seven time-steps is likely only accurate when working with daily time-steps. For hourly data, the equivalent assumption incurs computational complexity of $O(N)=168N$, which my computer cannot begin to run. Neither can my computer execute model runs using a year of daily data, so I have limited the scope to three months for this model.
+
+Because of issues with my input scaling model, which this builds upon, I produced two separate versions of this model. One utilises the time-variant IRF scaling in addition to input scaling. The other only uses estimates of antecedent rainfall to scale the IRF, and not input. This several problematic parameters, $\kappa$ and the regression coefficients for $\chi$ from the model, and allows a more precise evaluation of the effects of a time-variant IRF compared to the stationary IRF in the basic model.
+
+## Model Assessment
+
+I assessed model fit in three ways. I first compared their fit to the training dataset. This allowed assessment of whether they have sufficient complexity to describe the river system. Secondly, I analysed the individual model components and the validity metrics calculated by RStan. These provide a measure of how identifiable a model is (i.e. whether its specified parameterisation has one optimal answer) and whether the specified parameterisation naturally explains the observed dataset, or whether it becomes mathematically "contorted" into behavior it is not intended to hold. Thirdly, for those models which are suitably valid, I assess their predictive ability by hindcasting the streamflow for the calender year 2024.
+
+# Results
+
+## Model Fit
+
+```{r Fits, echo = F, message = F, warning = F, figure_caption = TRUE,fig.cap = "\\label{fig:fits}Model fits to the training dataset, daily data from the year 2023. Models A and B are fit to data from the calender year, while C and D are fit to the 1st of May and 31st of July to limit RAM use."}
+##No issues with the posterior sample.
+##Year 2023
+dat1 <- extract(readRDS("C:\\Users\\jonat\\Desktop\\BIO3019S\\BIO3019S-Streamflow-Project\\fits\\04.1_Basic.rds"))
+
+basic <- ggplot(dat_2023D, aes(x = as.Date(Date), y = Streamflow.Ave, colour = "Observed")) +            geom_line() + 
+            geom_point(aes(y = colMeans(data.frame(dat1$y)), colour = "Fit", alpha = 0.75)) + 
+            labs(x = "", y = "Volume (L/day)", subtitle = "A) Convolution-only") +
+            scale_colour_manual(name = "Data Source",
+                                breaks = c("Observed","Fit"),
+                                values = c("black", "#5ec962")) + 
+            theme_minimal() + 
+            theme(legend.position = "none")
+
+##High divergences, two params. with low ESS/mixing.
+##Year 2023
+dat2 <- extract(readRDS("C:\\Users\\jonat\\Desktop\\BIO3019S\\BIO3019S-Streamflow-Project\\fits\\04.2_Scaling.rds"))
+
+scaled <- ggplot(dat_2023D, aes(x = as.Date(Date), y = Streamflow.Ave, colour = "Observed"))+           geom_line() + 
+            geom_point(aes(y = colMeans(data.frame(dat2$y)), colour = "Fit"), alpha = 0.75) + 
+            labs(x = "Date", y = "Volume (L/day)", subtitle = "B) Input-scaling") +
+            scale_colour_manual(name = "Data Source",
+                                breaks = c("Observed","Fit"),
+                                values = c("black", "#21918c")) + 
+            theme_minimal() + 
+            theme(legend.position = "none")
+
+dat3 <- extract(readRDS("C:\\Users\\jonat\\Desktop\\BIO3019S\\BIO3019S-Streamflow-Project\\fits\\04.3_TimeVariant_Scaling.rds"))
+
+TV1 <- ggplot(dat_23MJD , aes(x = as.Date(Date), y = Streamflow.Ave, colour = "Observed"), ) + 
+            geom_line() + 
+            geom_point(aes(y = colMeans(dat3$y_sum), colour = "Fit", alpha = 0.75)) + 
+            labs(x = "", y = "", subtitle = "D) Input-scaling and time-variant IRF") +
+            scale_colour_manual(name = "Data Source",
+                                breaks = c("Observed","Fit"),
+                                values = c("black", "#440154")) + 
+            theme_minimal() + 
+            theme(legend.position = "none")
+
+dat4 <- extract(readRDS("C:\\Users\\jonat\\Desktop\\BIO3019S\\BIO3019S-Streamflow-Project\\fits\\04.4_TimeVariant_Scaling.rds"))
+
+TV2 <- ggplot(dat_23MJD , aes(x = as.Date(Date), y = Streamflow.Ave, colour = "Observed"), ) + 
+            geom_line() + 
+            geom_point(aes(y = colMeans(dat4$y_sum), colour = "Fit"), alpha = 0.75) + 
+            labs(x = "Date", y = "", subtitle = "C) Time-variant IRF") +
+            scale_colour_manual(name = "Data Source",
+                                breaks = c("Observed","Fit"),
+                                values = c("black", "#3b528b")) + 
+            theme_minimal() + 
+            theme(legend.position = "none")
+
+(basic + TV2)/(scaled + TV1)
+```
+
+In general, model fit was disappointing. The constricted range of the convolution only model bears concerning resemblance to a simple mean flow-rate. The input-scaling model was far better more successfully captures peak and minimum flow rates, but does so inconsistently (Figure \ref{fig:fits}). Time-variant impulse response function models (Figure \ref{fig:fits} C & D) have similar performance, with the only major effect of including input scaling constricted to a slightly tighter fit between May and June.
+
+\newpage
+
+```{R MC Basic, echo = F,figure_caption = TRUE, out.height = "70%", fig.cap = "\\label{fig:BasicIRF}Impulse response function for the convolution-only model."}
+####Basic model####
+xB <- seq(0,10, by = 1)
+yB <- dnbinom(xB, mu = 197, size = 0.01522362)
+
+ggplot(data = data.frame(x=xB, y=yB/sum(yB)), aes(y=y,x=x)) +
+  geom_col(fill = "#5ec962", colour = "black") + 
+  labs(x = "Lag", y = "Normalized density", subtitle = "Impulse response function") + 
+  scale_x_continuous(breaks = seq(0,10, by = 1)) + 
+  theme_minimal()
+```
+
+The impulse response function for the convolution-only model indicates nearly all rainfall falling each time-step has infiltrated the river by the next time-step (Figure \ref{fig:BasicIRF}). This may be true during the wet season, but likely departs from reality in dry seasons, where rainfall is absorbed by the soil and must slowly move through the ground to reach the river.
+
+\newpage
+
+```{R mc Scale, echo = F, message = F, warnings = F, figure_caption = TRUE,fig.cap = "\\label{fig:Scale}Components of the input-scaling model. A) The impulse response function. B) Proportion of total rainfall acting as recharge each time-step. C) Decay rate of antecedent rainfall by daily maximum windspeed."}
+####Scaling####
+dat2 <- extract(readRDS("C:\\Users\\jonat\\Desktop\\BIO3019S\\BIO3019S-Streamflow-Project\\fits\\04.2_Scaling.rds"))
+xS <- seq(0,10, by = 1)
+yS <- dnbinom(xS, mu = 0.2920842, size = 0.09015998)
+
+scaled_IRF <- ggplot(data = data.frame(x=xS, y=yS/sum(yS)), aes(y=y,x=x)) +
+  geom_col(fill = "#21918c", colour = "black") + 
+  labs(x = "Lag", y = "Normalized density", subtitle = "A) Impulse response function") + 
+  scale_x_continuous(breaks = seq(0,10, by = 1)) + 
+  theme_minimal()
+
+scale_beta <- ggplot(data = data.frame(y = colMeans(dat2$input_prop), x = as.Date(dat_2023D$Date)), aes(x=x, y = y)) + 
+  geom_line(colour = "#21918c") +
+  labs(x = "Date", y = expression(beta), subtitle = "B) Infiltration proportion") + 
+  theme_minimal()
+
+scale_chi <- ggplot(data = data.frame(y = exp(colMeans(dat2$chi)), x = dat_2023D$Wind.Speed.Max), aes(x=x,y=y)) + 
+  geom_point(colour = "#21918c") + 
+  geom_smooth(method = "lm", colour = "black") +
+  labs(x = "Maximum wind speed/ms", y = expression(chi), subtitle = "C) Rate of decay of antecedent rainfall by windspeed") + 
+  theme_minimal()
+
+(scaled_IRF+scale_beta)/scale_chi
+```
+
+The impulse response function for the input-scaling model is almost identical to that of the convolution only model (Figures \ref{fig:BasicIRF} & \ref{fig:Scale}A). Nevertheless, the proportion of rainfall infiltrating each time-step is extremely variable, and peak values coincide with high flow rates (Figures \ref{fig:fits}B & \ref{fig:Scale}B). The rate of decay of antecedent rainfall has some relationship with windspeeds, varying 0.5% with across maximum and minimum windspeeds (\ref{fig:Scale}C). Whilst this appears insignificant, exponential functions should not be under-estimated. That input proportion varies dramatically indicates the total antecedent rainfall is highly variable.
+
+\newpage
+
+```{R TV1, echo = F, message = F, warnings = F,figure_caption = TRUE, fig.cap = "\\label{fig:TVA}Components of the time-variant IRF model without input scaling. A) Relationship between mu and antecedent rain. B) Relationship between phi and antecedent rain. C) Impulse response function density at mean phi and maximum and minimum mu. D) Impulse response function density at mean mu and maximum and minimum phi."}
+
+dat4 <- extract(readRDS("C:\\Users\\jonat\\Desktop\\BIO3019S\\BIO3019S-Streamflow-Project\\fits\\04.3_TimeVariant_Scaling.rds"))
+
+TV1_mu <- ggplot(data = data.frame(y = colMeans(dat4$mu), x = colMeans(dat4$antecedent_rain)), aes(x=x,y=y))+
+  geom_point(colour = "#3b528b") + 
+  geom_smooth(method = "lm", colour = "black") +
+  labs(x = "Antecedent rain/L", y = expression(mu), subtitle = "A) Mu by antecedent rain") + 
+  theme_minimal()
+
+TV1_phi <- ggplot(data = data.frame(y = colMeans(dat4$phi), x = colMeans(dat4$antecedent_rain)), aes(x=x,y=y)) + 
+  geom_point(colour = "#3b528b") + 
+  geom_smooth(method = "lm", colour = "black") +
+  labs(x = "Antecedent rain/L", y = expression(phi), subtitle = "B) Phi by antecedent rain") + 
+  theme_minimal()
+
+x <- seq(0,6, by = 1)
+IRF_mu_max <- dnbinom(x, mu = max(dat4$mu) , size = mean(dat4$phi))
+IRF_mu_min <- dnbinom(x, mu = min(dat4$mu) , size = mean(dat4$phi))
+IRF_phi_max <- dnbinom(x, mu = mean(dat4$mu), size = max(dat4$phi))
+IRF_phi_min <- dnbinom(x, mu = mean(dat4$mu), size = max(dat4$phi))
+
+mu <- ggplot(data = data.frame(x = x, mu_max = IRF_mu_max/sum(IRF_mu_max), mu_min = IRF_mu_min/sum(IRF_mu_min))) + 
+  geom_col(aes(x = x, y = mu_min, fill = "Minimum"), colour = "black", alpha = 0.75) + 
+  geom_col(aes(x = x, y = mu_max, fill = "Maximum"), colour = "black", alpha = 0.75) + 
+  labs(x = "Lag", y = "Normalized density", subtitle = "C) IRF at mean phi, varied mu") +
+  scale_fill_manual(name = "",
+                    breaks = c("Maximum","Minimum"),
+                    values = c("#f0f921", "#7e03a8")) + 
+  theme_minimal()
+
+phi<- ggplot(data = data.frame(x = x, phi_max = IRF_phi_max/sum(IRF_phi_max), phi_min = IRF_phi_min/sum(IRF_phi_min))) + 
+    geom_col(aes(x = x, y = phi_min, fill = "Minimum"), colour = "black", alpha = 0.75) + 
+    geom_col(aes(x = x, y = phi_max, fill = "Maximum"), colour = "black", alpha = 0.75) + 
+  labs(x = "Lag", y = "", subtitle = "D) IRF at mean mu, varied phi") +
+  scale_fill_manual(name = "",
+                    breaks = c("Maximum","Minimum"),
+                    values = c("#f0f921", "#7e03a8")) + 
+  theme_minimal()
+
+(TV1_mu + TV1_phi)/(mu + phi)
+```
+
+At first glance, the volume of antecedent rainfall is minimal (Figure \ref{fig:TVA}A & B). This is not necessarily a problem on its own - antecedent rainfall is not intended to be mass balanced - but does indicate the model found a stable solution outside of the real parameter space. Of the impulse response function, the range of $\phi$ was so small as to have no discernible difference on system behavior between maximum and minimum values (Figure \ref{fig:TVA} D). The variance in $\mu$, however, was sufficient to allow two completely opposite behaviours: at its minimum value, practically all rain infiltrates the river in less than one timestep, while at its maximum, the infiltrated volume increases with lag (Figure \ref{fig:TVA} C).
+
+\newpage
+
+```{R TV2, echo = F, message = F, warnings = F,figure_caption = TRUE, fig.cap = "\\label{fig:TVB}Components of the time-variant impulse response function, input-scaling model. A) Proportion of total rainfall eventually infiltrating the river each time-step. B) Rate of decay of antecedent rainfall by windspeed. C-D) Effects of antecedent rainfall on mu and phi. E-F) Effects of varying mu and phi on the impulse response function."}
+dat3 <- extract(readRDS("C:\\Users\\jonat\\Desktop\\BIO3019S\\BIO3019S-Streamflow-Project\\fits\\04.3_TimeVariant_Scaling.rds"))
+
+TV2_beta <- ggplot(data = data.frame(y = colMeans(dat3$input_prop), x = as.Date(dat_23MJD$Date)), aes(x=x, y = y)) + 
+  geom_line(colour = "#440154") +
+  labs(x = "Date", y = expression(beta), subtitle = "A) Infiltration proportion") + 
+  theme_minimal()
+
+TV2_chi <- ggplot(data = data.frame(y = exp(colMeans(dat3$chi)), x = dat_23MJD$Wind.Speed.Max), aes(x=x,y=y)) + 
+  geom_point(colour = "#440154") + 
+  geom_smooth(method = "lm", colour = "black") +
+  labs(x = "Maximum wind speed/ms", y = expression(chi), subtitle = "B) Rate of decay of antecedent rainfall") + 
+  theme_minimal()
+
+
+TV2_mu <- ggplot(data = data.frame(y = colMeans(dat4$mu), x = colMeans(dat4$antecedent_rain)), aes(x=x,y=y)) + 
+  geom_point(colour = "#440154") + 
+  geom_smooth(method = "lm", colour = "black") +
+  labs(x = "Antecedent rain/L", y = expression(mu), subtitle = "C) Mu by antecedent rain") + 
+  theme_minimal()
+
+TV2_phi <- ggplot(data = data.frame(y = colMeans(dat4$phi), x = colMeans(dat4$antecedent_rain)), aes(x=x,y=y)) + 
+  geom_point(colour = "#440154") + 
+  geom_smooth(method = "lm", colour = "black") +
+  labs(x = "Antecedent rain/L", y = expression(phi), subtitle = "D) Phi by antecedent rain") + 
+  theme_minimal()
+
+x <- seq(0,6, by = 1)
+IRF_mu_max <- dnbinom(x, mu = max(dat3$mu) , size = mean(dat3$phi))
+IRF_mu_min <- dnbinom(x, mu = min(dat3$mu) , size = mean(dat3$phi))
+IRF_phi_max <- dnbinom(x, mu = mean(dat3$mu), size = max(dat3$phi))
+IRF_phi_min <- dnbinom(x, mu = mean(dat3$mu), size = max(dat3$phi))
+
+mu <- ggplot(data = data.frame(x = x, mu_max = IRF_mu_max/sum(IRF_mu_max), mu_min = IRF_mu_min/sum(IRF_mu_min))) + 
+  geom_col(aes(x = x, y = mu_min, fill = "Minimum"), colour = "black", alpha = 0.75) + 
+  geom_col(aes(x = x, y = mu_max, fill = "Maximum"), colour = "black", alpha = 0.75) + 
+  labs(x = "Lag", y = "Normalized density", subtitle = "E) IRF at mean phi, varied mu") +
+  scale_fill_manual(name = "",
+                    breaks = c("Maximum","Minimum"),
+                    values = c("#f98e09", "#57106e")) + 
+  theme_minimal()
+
+phi<- ggplot(data = data.frame(x = x, phi_max = IRF_phi_max/sum(IRF_phi_max), phi_min = IRF_phi_min/sum(IRF_phi_min))) + 
+    geom_col(aes(x = x, y = phi_min, fill = "Minimum"), colour = "black", alpha = 0.75) + 
+    geom_col(aes(x = x, y = phi_max, fill = "Maximum"), colour = "black", alpha = 0.75) + 
+  labs(x = "Lag", y = "", subtitle = "F) IRF at mean mu, varied phi") +
+  scale_fill_manual(name = "",
+                    breaks = c("Maximum","Minimum"),
+                    values = c("#f98e09", "#57106e")) + 
+  theme_minimal()
+
+(TV2_beta + TV2_chi)/(TV2_mu + TV2_phi)/(mu + phi)
+
+```
+
+The behaviour of the impulse response function components of this model bear significant similarity to that without input-scaling (Figures \ref{fig:TVB} & \ref{fig:TVA}), and the same observations are made. However, the behaviour of input scaling appears different, in that antecedent rainfall decays 5% faster over all windspeeds, even though the difference between windspeeds is similar to Figure \ref{fig:Scale}.
+
+\newpage
+
+## Model validity
+
+```{R Validity, echo = F, message = F, warning = F}
+data <- matrix(data = c("Convolution-only", "Yes", "Yes", "High", "None",
+                        "Input-scaling", "Sans chi regression terms","Sans chi regression terms","Sans chi regression terms & kappa", "Numerous",
+                        "Time-variant IRF", "No", "No", "Low","Numerous",
+                        "Time-variant IRF & input-scaling",  "No", "No", "Low","Numerous"),
+               dimnames = list(c(),c("Model","Convergence","Mixing", "Effective Sample Size", "Divergent Transitions")),
+               nrow = 4, ncol = 5,
+               byrow = T)
+knitr::kable(x = data,
+             caption = "\\label{tab:validity}Validity diagnostics for each model. Convergence and mixing infered from Rhat and chain trace plots. Effective sample size and divergent transitions reported by RStan.")
+```
+
+Only the simplest model achieved appreciable validity (Table \ref{tab:validity}). Although the input-scaling model tended to fail specifically in sampling the regression terms for the $\chi_i \sim windspeed_i$, relationship, removing these terms and estimating a single $\chi$ tended to only excacerbate the issues. The pathologies for the time-variant appear independent of including the full $\chi$ regression, as models with and without this performed similarly poorly.
+
+\newpage
+
+## Modeled Hindcasts
+
+```{R Forecast, echo = F, figure_caption = TRUE, out.width = "75%", out.height = "75%", fig.cap = "\\label{fig:pred}Streamflow for the year 2024 forecast by the convolution only model, trained on the year 2023 and given rainfall for future timesteps."}
+inv_logit <- function(x) {
+  exp(x) / (1 + exp(x))
+}
+
+####Basic model####
+##Specify the data
+Rainfall_B <- fft(dat_2024D$Rainfall.Total*2.46e6)
+Streamflow_obs <- dat_2024D[,c(2,3)] 
+Ntimesteps <- nrow(Streamflow_obs)
+
+##Specify the parameters
+mu_B <- 197
+phi_B <- 0.01522362
+IRF_B <- numeric(Ntimesteps)
+
+##Calculate the convolution
+for(i in 1:Ntimesteps){
+  #unnormalized values
+  IRF_B[i] <- dnbinom(i, mu = mu_B, size = phi_B)
+}
+#implement sum-to-one normalization
+normalization <- sum(IRF_B)
+IRF_B <- IRF_B/normalization
+
+#calculate the fourier transform
+IRF_B <- fft(IRF_B)
+  
+##Predict streamflow
+Streamflow_pred_B <- Re(fft(IRF_B*Rainfall_B, inverse = T))/Ntimesteps
+
+##Produce a plot for the results
+
+ggplot(Streamflow_obs, aes(x = as.Date(Date), y = Streamflow.Ave+1.27e6 , colour = "Observed"), ) + 
+            geom_line() + 
+            geom_point(aes(y = Streamflow_pred_B, colour = "Fit", alpha = 0.75)) + 
+            labs(x = "", y = "Volume (L day)", subtitle = "A) Convolution-only") +
+            scale_colour_manual(name = "Data Source",
+                                breaks = c("Observed","Fit"),
+                                values = c("black", "#5ec962")) + 
+            theme_minimal() + 
+            theme(legend.position = "none")
+
+```
+
+The predictive fit of my convolution-only model appears no worse than its training fit (Figure \ref{fig:pred}), but also no better. The fit is poor, but consistent across datasets. This contrasts to the more complex models, whose hindcasting ability was past the point of being graphically unintelligible despite fitting the training data better.
+
+# Discussion
+
+The goal of this project was to test the validity of mathematical structures designed for frequentist models when applied to Bayesian methodologies.
+
+The performance of the convolution-only model is not surprising given its highly general nature (Figures \ref{fig:fits}A and \ref{fig:pred}). This strongly indicates that the mathematical structure of the convolution, and the precise impulse response function chosen, is equally applicable within a Bayesian as a frequentist approach. That the model model is underfit is not a result of it being wrong, but of it being simple. It is not suitable use it for predicting floods of a major river running through a metropolis, but as a building block for future models it is quite suitable.
+
+While built on a solid foundation, more complex models failed at approximating the general form of the phenomena studied (Table \ref{tab:validity}). Though they were able to contort themselves into stronger fits to the training dataset (Figure \ref{fig:fits}), this had no predictive value. Neither did variants which attempt to simplify the estimation of the rate of exponential decay of antecedent rainfall, $\chi$. Additionally, the estimated volumes of antecedent rainfall, $r_{ai}$, while not intended to be mass-balanced, were so far from the probable real values that either a serious contortion of the model (an inappropriate mathematical structure partially succeeding in recreating behaviour it is not suitable to model), or degeneracy (i.e. the opposite of identifiability, a model possessing several combinations of parameters values which explain the data) [@Identity]. These options are not mutually exclusive. 
+
+Given the low effective sampling size for $\kappa$ in the input-scaling model ($\kappa$ is a shape parameter for the inverse logistic function), it seems likely a sigmoidal curve is an inappropriate function to calculate input proportion, $\beta$, from the volume of antecedent rainfall. Though this function was chosen with the knowlegde that $\kappa$ would be very small to allow a gradual increase of $\beta$ over a large range of $r_{ai}$, in hindsight this may have been a mistake, and sampling $\kappa$ from log-space to produce a suitable gradient for Stan to sample from may have insufficiently plastered over the function's inadequacy. The ease at which the sigmoidal curve could be understood was its chief advantage to me, but a logarithmic or threshold function may have been better. A suitable function should have a long, smooth incline over a large range of input values, but have shape parameters which occupy a larger range of positive real space than $\kappa$ did.
+
+The fact that $r_{ai}$ was far smaller than expected (Figures \ref{fig:TVA}) may be another symptom of this. The sigmoidal curve can be parameterised with a larger $\kappa$ if its input is very small, as the domain of its sloped portion can be smaller. Setting initial values, or specifying strong priors for these terms, may have forced the model into another, more accurate stable region of posterior space. However, one disadvantage of hierarchical models is that they can become abstracted at the level of hyper-parameters if not anchored in enough data. A more elegant solution is thus to specify an appropriate relationship with the measured soil moistures provided by @Jasper. The reasons this was not done was discussed in the methodology, but it seems a greater investment of effort was necessary. 
+
+As indicated by Table \ref{tab:validity}, both time-variant impulse response function models also failed to produce quality posterior samples. This may have been due to inheriting the problematic structure from the input-scaling model, as the variance of $\mu$ and $\phi$ in time was a function of $r_{ai}$. I had hoped that allowing the model to explain more system behaviour might have reduced degeneracy and forced it to assume more probable values for $r_{ai}$, but either the additional complexity did not have sufficient explanatory power to achieve this, or it itself was degenerate. Unfortunately, this can only be definitively explained with more models. For now, it seems likely to me that the simple assumption of a linear relationship between $\mu$ and $\phi$ and $r_{ai}$ is not itself sufficient. For the same reason as with $\kappa$, a large $r_{ai}$ will force small regression coefficients. 
+
+Thus, the core woe of my models seem to be demanding too much flexibility from functions (linear and sigmoidal) not suitable for a very dynamic system (e.g. fluctuations in streamflow or $r_{ai}$). The process of estimating antecedent rainfall, and input proportion and impulse response function parameters as functions of it, may be sound in theory, but is fails in execution. More suitable functions, or suitable relationships against measured soil moisture, are the likely remedies.
+
+To answer my original question, stationary convolutions appear generally suitable for modelling streamflow in a Bayesian modelling environment. The process of scaling input and impulse response function parameters according to antecedent rainfall can likely be performed using a latent variable estimation, but depends on suitable functions to link the variables together.
+
+\newpage
+
+# Declarations
+
+AI (Gemini 2.5 Flash) was used in this project as a technical advisor for three purposes:
+1. Introducing mathematical concepts beyond my current education (i.e. the Fourier transform),
+2. Finding specific functions in Stan, instead of trawling through the documentation,
+3. Index optimizations and debugging, especially with time-variant models, where I could not get model to run myself.
+
+I declare that the explanations of this work are from my own understanding. Where AI introduced topics to me, I was intentional in investigating them further by conventional means so I properly understood them. For evidence, I refer the reader to my Stan files.
+
+# References
