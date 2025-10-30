@@ -1,19 +1,4 @@
----
-title: "README"
-author: "Jonathan Clarke"
-date: "`r Sys.Date()`"
-output: pdf_document
----
-
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-```
-
-# Outline
-
 This repository contains the associated code for downloading the data, executing the models, and producing the manuscript for a project taken during a course run by the Department of Biological Sciences, University of Cape Town. 
-
-# Files
 
 - 00_dataImport.R - R script to download data from Github (see the links coded in the script), and specify a function for ease of data subsetting.
 
